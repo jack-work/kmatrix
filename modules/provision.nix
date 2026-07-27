@@ -88,8 +88,10 @@ let
       secret=$(cat "${cfg.stateDir}/registration_shared_secret")
 
       # ── register (idempotent) ───────────────────────────────────
-      if [ "$MX_ADMIN" = "1" ]; then admin_word=admin; admin_bool=true
-      else admin_word=notadmin; admin_bool=false
+      if [ "$MX_ADMIN" = "1" ]; then
+        admin_word="admin"; admin_bool="true"
+      else
+        admin_word="notadmin"; admin_bool="false"
       fi
 
       nonce=$(curl -fsS "$hs/_synapse/admin/v1/register" | jq -r .nonce)
