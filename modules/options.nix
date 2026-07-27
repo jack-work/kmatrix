@@ -1,0 +1,393 @@
+# gluck-matrix — the option surface.
+#
+# Everything a host config touches lives here. The shape mirrors the rest
+# of the stack: the site names a *subdomain*, never the zone; the platform
+# (services.kelliher-web.baseDomains) supplies the zone.
+{ config, lib, ... }:
+let
+  cfg = config.services.gluck-matrix;
+
+  baseDomain = lib.head (config.services.kelliher-web.baseDomains ++ [ "invalid" ]);
+
+  accountCommon = {
+    displayName = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "Echo Bot";
+      description = ''
+        Matrix display name, set on every provision run. Null leaves
+        whatever the account already has.
+      '';
+    };
+
+    admin = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Grant Synapse *server admin* rights — full access to the
+        `/_synapse/admin` API (create users, list rooms, deactivate
+        accounts). Only meaningful for accounts you trust with the
+        whole homeserver.
+      '';
+    };
+
+    autoJoin = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "#lab:kelliher.info" ];
+      description = ''
+        Room aliases or IDs to join at provision time. Joining an
+        invite-only room the account was never invited to logs a
+        warning and continues — provisioning never fails on this.
+      '';
+    };
+
+    passwordFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/run/secrets/matrix-jack-password";
+      description = ''
+        Path to a file holding this account's password (sops-nix,
+        typically). When null, a random password is generated once at
+        first provision and kept in the account's state directory —
+        read it with
+        `ssh spain 'sudo cat /var/lib/gluck-matrix/accounts/<name>/password'`.
+
+        Note: the password is only used at *registration* time (and to
+        mint an access token). Changing this file later does not reset
+        the password of an account that already exists — do that with
+        `matrix-admin` or from a client.
+      '';
+    };
+  };
+in
+{
+  options.services.gluck-matrix = {
+    enable = lib.mkEnableOption "gluck-matrix — Synapse homeserver on kelliher-web";
+
+    serverName = lib.mkOption {
+      type = lib.types.str;
+      default = baseDomain;
+      example = "kelliher.info";
+      description = ''
+        The homeserver's `server_name` — the part after the colon in
+        every MXID (`@jack:kelliher.info`). **Effectively immutable
+        once accounts exist**: changing it orphans every user, room and
+        piece of media. Choose before the first deploy.
+
+        Defaults to the platform's first base domain, which means MXIDs
+        read `@you:kelliher.info` while the server itself lives at
+        `<subdomain>.kelliher.info`. That split requires the well-known
+        delegation documents this module serves at the apex (see
+        `serveWellKnown`). Set this to the same value as the public
+        host (e.g. "matrix.kelliher.info") if you would rather not
+        touch the apex at all.
+      '';
+    };
+
+    subdomain = lib.mkOption {
+      type = lib.types.str;
+      default = "matrix";
+      description = ''
+        Label for the homeserver's own public host —
+        `<subdomain>.<baseDomain>`. This is what clients actually
+        connect to, and what the well-known documents point at.
+      '';
+    };
+
+    serveWellKnown = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.serverName != "${cfg.subdomain}.${baseDomain}";
+      defaultText = lib.literalExpression "serverName != \"<subdomain>.<baseDomain>\"";
+      description = ''
+        Register an extra Caddy site on `serverName` itself that serves
+        `/.well-known/matrix/server` and `/.well-known/matrix/client`,
+        pointing at the real homeserver host. Required whenever
+        `serverName` differs from the public host — which is the
+        default (apex MXIDs, homeserver on a subdomain).
+
+        Everything else on that hostname redirects to
+        `wellKnownFallback`. Note this puts the apex record under
+        Terraform's management the next time you regenerate
+        `hostnames.auto.tfvars.json`.
+      '';
+    };
+
+    wellKnownFallback = lib.mkOption {
+      type = lib.types.str;
+      default = "https://jack.${baseDomain}";
+      description = "Where non-well-known requests to `serverName` are redirected.";
+    };
+
+    port = lib.mkOption {
+      type = lib.types.port;
+      default = 8008;
+      description = "Loopback port Synapse's client listener binds.";
+    };
+
+    federation = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Speak to the wider Matrix network. Off by default: a private
+        homeserver that federates inherits the public network's spam,
+        abuse-report and key-server surface for no benefit if every
+        account is yours.
+
+        On, federation traffic rides the same Cloudflare tunnel on 443
+        via the `m.server` delegation document — no extra ports, no
+        8448 listener. Flipping this later is safe (unlike
+        `serverName`).
+      '';
+    };
+
+    maxUploadSize = lib.mkOption {
+      type = lib.types.str;
+      default = "100M";
+      description = "Synapse `max_upload_size`; the Caddy site is sized to match.";
+    };
+
+    dataDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/matrix-synapse";
+      description = "Synapse state (signing key, media store).";
+    };
+
+    stateDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/gluck-matrix";
+      description = ''
+        Where this module keeps the registration shared secret and the
+        per-account passwords/access tokens it provisions. Root-owned,
+        0700; services receive individual files via systemd
+        `LoadCredential`, never by reading this directory themselves.
+      '';
+    };
+
+    extraSettings = lib.mkOption {
+      type = lib.types.attrs;
+      default = { };
+      example = lib.literalExpression ''{ presence.enabled = false; }'';
+      description = "Merged into `services.matrix-synapse.settings` last — the escape hatch.";
+    };
+
+    # ── admin API access ────────────────────────────────────────────
+    admin = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Provision a server-admin account (`adminUser`) and keep a live
+          access token for it on disk, plus a `matrix-admin` CLI on the
+          host that speaks the Synapse admin API with it:
+
+            ssh spain 'sudo matrix-admin GET /_synapse/admin/v2/users?from=0'
+            ssh spain 'sudo matrix-admin POST /_synapse/admin/v1/rooms/<id>/make_room_admin'
+
+          This is the machine-facing key to the homeserver. It never
+          leaves spain and is only readable by root.
+        '';
+      };
+
+      user = lib.mkOption {
+        type = lib.types.str;
+        default = "provisioner";
+        description = "Localpart of the admin account.";
+      };
+    };
+
+    # ── Element web client ──────────────────────────────────────────
+    element = {
+      enable = lib.mkEnableOption "Element web client for this homeserver";
+
+      subdomain = lib.mkOption {
+        type = lib.types.str;
+        default = "chat";
+        description = "Label for Element — `<subdomain>.<baseDomain>`.";
+      };
+
+      requireAuth = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Gate the Element *static bundle* behind Authelia 2FA. Purely
+          defence in depth — Matrix still authenticates you separately
+          once the app loads, and native clients talk to the homeserver
+          host directly, which is never Authelia-gated.
+        '';
+      };
+
+      conf = lib.mkOption {
+        type = lib.types.attrs;
+        default = { };
+        description = "Merged over Element's default `config.json`.";
+      };
+    };
+
+    # ── declarative accounts ────────────────────────────────────────
+    users = lib.mkOption {
+      default = { };
+      description = ''
+        Human accounts. Created if absent at every activation, never
+        deleted. The attribute name is the MXID localpart.
+      '';
+      example = lib.literalExpression ''
+        {
+          jack = {
+            displayName = "Jack";
+            admin = true;
+            passwordFile = config.sops.secrets.matrix-jack-password.path;
+          };
+        }
+      '';
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = accountCommon // {
+            issueToken = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Also mint and store a long-lived access token for this
+                account under `<stateDir>/accounts/<name>/access_token`.
+                Handy for scripting against the client-server API as a
+                human user; off by default because a human's token is a
+                credential you have to think about.
+              '';
+            };
+          };
+        }
+      );
+    };
+
+    bots = lib.mkOption {
+      default = { };
+      description = ''
+        Chatbots. Each one gets, in order: a Matrix account, a stable
+        access token, and a hardened systemd service that receives the
+        token through `LoadCredential` and its dependencies through the
+        Nix store. The attribute name is the MXID localpart and the
+        unit name suffix (`matrix-bot-<name>.service`).
+
+        Supply either `entrypoint` (a Python file, run with
+        `pythonPackages`) or `execStart` (anything else).
+      '';
+      example = lib.literalExpression ''
+        {
+          echo = {
+            displayName = "Echo";
+            autoJoin = [ "#lab:kelliher.info" ];
+            entrypoint = ./bots/echo.py;
+            pythonPackages = ps: with ps; [ matrix-nio ];
+          };
+        }
+      '';
+      type = lib.types.attrsOf (
+        lib.types.submodule (
+          { name, ... }:
+          {
+            options = accountCommon // {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = "Run this bot. Set false to park it without deleting the account.";
+              };
+
+              entrypoint = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                description = "Python file to exec. Mutually exclusive with `execStart`.";
+              };
+
+              pythonPackages = lib.mkOption {
+                type = lib.types.functionTo (lib.types.listOf lib.types.package);
+                default = ps: with ps; [ matrix-nio aiohttp ];
+                defaultText = lib.literalExpression "ps: with ps; [ matrix-nio aiohttp ]";
+                description = ''
+                  Dependencies for `entrypoint`, in the usual
+                  `python3.withPackages` shape. The default is enough
+                  for a plain client bot; add `requests`, `duckdb`,
+                  `openai`, whatever the bot needs.
+                '';
+              };
+
+              execStart = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                example = lib.literalExpression ''"''${pkgs.my-bot}/bin/my-bot"'';
+                description = "Command line for non-Python bots. Mutually exclusive with `entrypoint`.";
+              };
+
+              environment = lib.mkOption {
+                type = lib.types.attrsOf lib.types.str;
+                default = { };
+                description = ''
+                  Extra environment. The module always supplies
+                  MATRIX_HOMESERVER, MATRIX_SERVER_NAME, MATRIX_USER_ID,
+                  MATRIX_DEVICE_ID, MATRIX_ACCESS_TOKEN_FILE and
+                  MATRIX_STORE_DIR.
+                '';
+              };
+
+              credentials = lib.mkOption {
+                type = lib.types.attrsOf lib.types.path;
+                default = { };
+                example = lib.literalExpression ''{ openai_key = "/run/secrets/openai-key"; }'';
+                description = ''
+                  Extra secrets, exposed as
+                  `$CREDENTIALS_DIRECTORY/<name>` via systemd
+                  LoadCredential. systemd reads these as root before
+                  dropping privileges, so a DynamicUser bot can hold a
+                  root-owned sops secret without ever owning the file.
+                '';
+              };
+
+              runtimePackages = lib.mkOption {
+                type = lib.types.listOf lib.types.package;
+                default = [ ];
+                description = "Packages placed on the bot's PATH.";
+              };
+
+              stateDirectory = lib.mkOption {
+                type = lib.types.str;
+                default = "matrix-bot-${name}";
+                description = "`/var/lib/<this>` — the bot's own writable scratch (nio store, sqlite, …).";
+              };
+
+              extraServiceConfig = lib.mkOption {
+                type = lib.types.attrs;
+                default = { };
+                description = "Merged last into the unit's serviceConfig.";
+              };
+            };
+          }
+        )
+      );
+    };
+
+    # ── computed views (read-only by convention) ────────────────────
+    publicHost = lib.mkOption {
+      type = lib.types.str;
+      internal = true;
+      description = "Read-only: the homeserver's public hostname.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    services.gluck-matrix.publicHost = "${cfg.subdomain}.${baseDomain}";
+
+    assertions = [
+      {
+        assertion = config.services.kelliher-web.baseDomains != [ ];
+        message = "gluck-matrix: services.kelliher-web.baseDomains is empty — the module has no zone to live in.";
+      }
+    ]
+    ++ lib.mapAttrsToList (n: b: {
+      assertion = (b.entrypoint == null) != (b.execStart == null);
+      message = "gluck-matrix: bot '${n}' must set exactly one of `entrypoint` or `execStart`.";
+    }) cfg.bots
+    ++ lib.mapAttrsToList (n: _: {
+      assertion = !(cfg.users ? ${n});
+      message = "gluck-matrix: '${n}' is declared as both a bot and a user — one MXID, one owner.";
+    }) cfg.bots;
+  };
+}
