@@ -86,6 +86,44 @@ Python remains available for throwaway bots — set `entrypoint` and
 `pythonPackages` instead of `execStart` and the module builds a
 `python3.withPackages` environment (default: `matrix-nio`).
 
+## Login
+
+Humans sign in through Authelia; bots do not.
+
+```nix
+oidc = {
+  enable = true;
+  clientSecretFile = config.sops.secrets.matrix-oidc-client-secret.path;
+};
+```
+
+Clients then show a **"Continue with kelliher.info"** button: the usual
+portal, lldap identity, 2FA, and back. Synapse is a confidential OIDC
+client — it holds the secret, Authelia holds only its PBKDF2 digest,
+which is why that half can sit in plain Nix.
+
+Three things make this fit the rest of the stack:
+
+- **`allow_existing_users`** — the accounts this module declares already
+  exist, so an SSO login attaches to `@jack:kelliher.info` rather than
+  minting a second MXID. The localpart comes from Authelia's
+  `preferred_username`, which is the lldap uid.
+- **A group gate** — `oidc.requiredGroup` (default `matrix-user`) is
+  declared through the site's `requiredGroups`, so `lldap-bootstrap`
+  creates it; Authelia enforces it with a per-client authorization
+  policy whose `default_policy` is `deny`. Not in the group, no Matrix.
+- **Local passwords stay on.** Bots mint their first token with a
+  password login over loopback, and it is the way back in if Authelia
+  is down. `oidc.passwordLogin = false` is possible but asserted
+  against while any bot or token-issuing account exists.
+
+Note that native mobile clients reach the homeserver directly and are
+*not* behind Authelia's forward-auth — but with OIDC on, they still can't
+log in without passing the portal. Element X is not supported: it wants
+OIDC-native (MAS) login, not this legacy SSO delegation. Element classic
+works on every platform.
+
+
 ## How accounts get made
 
 `/_synapse/admin/v1/register`, the shared-secret flow: a nonce, an
