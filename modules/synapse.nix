@@ -18,6 +18,8 @@
 let
   cfg = config.services.kmatrix;
 
+  baseDomain = lib.head (config.services.kelliher-web.baseDomains ++ [ "invalid" ]);
+
   dbName = "matrix-synapse";
 
   # Synapse spells sizes "100M"; Caddy wants "100MB".
@@ -171,6 +173,11 @@ in
               };
             }
           ];
+
+          # Clients not on this list still work — they just get an
+          # extra "continue to <host>?" confirmation page after the
+          # portal. Our own Element does not need to ask.
+          sso.client_whitelist = lib.optional cfg.element.enable "https://${cfg.element.subdomain}.${baseDomain}/";
         }
         // lib.optionalAttrs (!cfg.federation) {
           # The empty whitelist is Synapse's "federate with nobody".
