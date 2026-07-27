@@ -17,6 +17,10 @@
 //   - "!ping"        → "pong",
 //   - "!echo <text>" → "<text>",
 //   - in a two-person room, echoes anything else you say.
+//
+// It has no end-to-end encryption. Element encrypts new DMs by default,
+// so a plain "start chat" with this bot produces a room whose contents
+// it cannot read — it says so, once, rather than sitting there mute.
 package main
 
 import (
@@ -26,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,6 +90,28 @@ func main() {
 		log.Printf("joining %s (invited by %s)", evt.RoomID, evt.Sender)
 		if _, err := client.JoinRoomByID(ctx, evt.RoomID); err != nil {
 			log.Printf("warn: could not join %s: %v", evt.RoomID, err)
+		}
+	})
+
+	// No crypto: an encrypted room is opaque. Say so once per room —
+	// a plaintext event in an encrypted room renders with a shield
+	// warning in Element, which is exactly the right signal.
+	var warned sync.Map
+	syncer.OnEventType(event.EventEncrypted, func(ctx context.Context, evt *event.Event) {
+		if evt.Sender == userID || evt.Timestamp < startedAt.UnixMilli() {
+			return
+		}
+		if _, seen := warned.LoadOrStore(evt.RoomID, true); seen {
+			return
+		}
+		log.Printf("encrypted room %s — cannot read it", evt.RoomID)
+		if _, err := client.SendMessageEvent(ctx, evt.RoomID, event.EventMessage,
+			&event.MessageEventContent{
+				MsgType: event.MsgNotice,
+				Body: "I can't read encrypted rooms — I have no E2EE keys. " +
+					"Make a room with encryption turned off and invite me there.",
+			}); err != nil {
+			log.Printf("warn: could not warn in %s: %v", evt.RoomID, err)
 		}
 	})
 

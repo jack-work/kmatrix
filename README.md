@@ -144,3 +144,18 @@ ssh spain 'sudo -u postgres psql matrix-synapse -c "\dt"'
 `serverName` is baked into every MXID, room ID and event signature. It
 cannot be changed after the first account exists without abandoning the
 server. Everything else here is reversible.
+
+## Encryption
+
+The reference bot has **no E2EE**. Element turns encryption on for new
+DMs by default, and a room whose history is encrypted is opaque to a
+client without keys — so the bot answers such a room once, in plaintext,
+explaining itself, and otherwise stays quiet.
+
+To chat with a bot: create a room with encryption switched **off** at
+creation time and invite it (it auto-joins). Encryption for a room can
+never be turned off afterwards.
+
+Giving a bot real E2EE means mautrix's `crypto/cryptohelper` plus a
+SQLite store in `MATRIX_STORE_DIR` — a bigger lift, and only worth it
+for bots that must live in your encrypted rooms.
