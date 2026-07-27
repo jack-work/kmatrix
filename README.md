@@ -124,6 +124,26 @@ OIDC-native (MAS) login, not this legacy SSO delegation. Element classic
 works on every platform.
 
 
+### Why legacy SSO and not OIDC-native
+
+Matrix has two delegation models. This module uses the older one —
+Synapse's `oidc_providers`, where Synapse stays the identity authority
+and consults Authelia only at login.
+
+The newer one (MSC3861, now a first-class `mas:` config section rather
+than an experimental flag) hands *all* authentication to
+`matrix-authentication-service`. It is what Element X requires, and it
+is where Matrix is heading. It is also, today, the wrong trade here:
+with `mas.enabled`, Synapse stops registering `/_matrix/client/v3/login`
+entirely, `/_synapse/admin/v1/register` disappears behind
+`if not auth_delegated`, and every step this module's provisioner takes
+ceases to exist. Add that nixpkgs ships the MAS package but no NixOS
+module, and that MAS sits in *front* of Authelia rather than replacing
+it, and it is a fourth identity component plus a rewrite.
+
+Not a one-way door: `mas-cli syn2mas` is a supported migration when the
+calculus changes. See `~/.config/figaro/skills/kstack/kmatrix.md`.
+
 ## How accounts get made
 
 `/_synapse/admin/v1/register`, the shared-secret flow: a nonce, an
