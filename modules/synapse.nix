@@ -132,9 +132,47 @@ in
         # server_name *is* the public host; otherwise Caddy serves the
         # delegation documents on the apex (see below).
         serve_server_wellknown = !cfg.serveWellKnown;
+
+        # Local passwords remain the bots' way in even when humans log
+        # in through Authelia; see options.nix.
+        password_config.enabled = cfg.oidc.passwordLogin;
       }
       (
-        lib.optionalAttrs (!cfg.federation) {
+        lib.optionalAttrs cfg.oidc.enable {
+          # Delegated login. Synapse is a confidential client: it holds
+          # the secret, Authelia holds only its PBKDF2 digest.
+          #
+          # The redirect URI Authelia must allow is
+          #   https://<publicHost>/_synapse/client/oidc/callback
+          # which is why public_baseurl above has to be exactly right.
+          oidc_providers = [
+            {
+              idp_id = "authelia";
+              idp_name = cfg.oidc.idpName;
+              issuer = cfg.oidc.issuer;
+              client_id = cfg.oidc.clientId;
+              client_secret_path = toString cfg.oidc.clientSecretFile;
+              client_auth_method = "client_secret_basic";
+              scopes = [
+                "openid"
+                "profile"
+                "email"
+                "groups"
+              ];
+              # The declared accounts already exist; an SSO login
+              # attaches to them rather than minting a second MXID.
+              allow_existing_users = cfg.oidc.allowExistingUsers;
+              user_mapping_provider.config = {
+                # Authelia's preferred_username is the lldap uid, which
+                # is what this module names accounts after.
+                localpart_template = "{{ user.preferred_username }}";
+                display_name_template = "{{ user.name }}";
+                email_template = "{{ user.email }}";
+              };
+            }
+          ];
+        }
+        // lib.optionalAttrs (!cfg.federation) {
           # The empty whitelist is Synapse's "federate with nobody".
           federation_domain_whitelist = [ ];
           trusted_key_servers = [ ];
@@ -157,6 +195,10 @@ in
       # for its own API.
       requireAuth = false;
       proxyTo = cfg.port;
+      # Not enforced by Caddy (this site is ungated) — declared so the
+      # platform tells lldap-bootstrap to create the group that
+      # Authelia's OIDC policy gates login on.
+      requiredGroups = lib.optional (cfg.oidc.enable && cfg.oidc.requiredGroup != "") cfg.oidc.requiredGroup;
       extraConfig = ''
         # The Synapse admin API is root-of-the-homeserver. It stays on
         # loopback — reachable from spain itself (see `kmatrix-admin`),

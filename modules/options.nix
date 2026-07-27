@@ -196,6 +196,82 @@ in
       };
     };
 
+    # ── login delegation ────────────────────────────────────────────
+    oidc = {
+      enable = lib.mkEnableOption ''
+        login delegation to Authelia over OIDC. Instead of a Matrix
+        password, clients get a "Continue with <idpName>" button that
+        walks the usual portal: lldap identity, 2FA, one session.
+
+        Matrix passwords stay enabled alongside it (see `passwordLogin`)
+        — bots authenticate locally and never touch the portal, and a
+        password login is the way back in if Authelia is down
+      '';
+
+      issuer = lib.mkOption {
+        type = lib.types.str;
+        default = "https://auth.${baseDomain}";
+        description = "Authelia's OIDC issuer URL.";
+      };
+
+      clientId = lib.mkOption {
+        type = lib.types.str;
+        default = "kmatrix";
+        description = "Must match the `client_id` of the Authelia client in identity.nix.";
+      };
+
+      clientSecretFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = "/run/secrets/matrix-oidc-client-secret";
+        description = ''
+          File holding the *plaintext* client secret (a sops secret,
+          owned by `matrix-synapse`). Authelia holds only its PBKDF2
+          digest, which is why that side can live in plain Nix.
+        '';
+      };
+
+      idpName = lib.mkOption {
+        type = lib.types.str;
+        default = baseDomain;
+        description = "Label on the SSO button in the client.";
+      };
+
+      requiredGroup = lib.mkOption {
+        type = lib.types.str;
+        default = "matrix-user";
+        description = ''
+          lldap group that gates the OIDC client. Declared to the
+          platform through the site's `requiredGroups`, so
+          `lldap-bootstrap` creates it without an identity.nix edit;
+          enforcement itself is Authelia's, via a per-client
+          authorization policy. Set to "" to gate on nothing.
+        '';
+      };
+
+      allowExistingUsers = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Let an OIDC login attach to an account that already exists
+          with the same localpart — which is exactly the case for the
+          accounts this module declares. With this off, signing in as
+          `jack` through Authelia would try to mint a *second* MXID.
+        '';
+      };
+
+      passwordLogin = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Keep `m.login.password` enabled. Required for bots: their
+          first token comes from a password login over loopback. Turn
+          it off only if every bot already holds a valid token and you
+          never intend to re-provision one.
+        '';
+      };
+    };
+
     # ── Element web client ──────────────────────────────────────────
     element = {
       enable = lib.mkEnableOption "Element web client for this homeserver";
@@ -387,6 +463,18 @@ in
       {
         assertion = config.services.kelliher-web.baseDomains != [ ];
         message = "kmatrix: services.kelliher-web.baseDomains is empty — the module has no zone to live in.";
+      }
+      {
+        assertion = cfg.oidc.enable -> cfg.oidc.clientSecretFile != null;
+        message = "kmatrix: oidc.enable requires oidc.clientSecretFile (the plaintext secret Authelia holds the digest of).";
+      }
+      {
+        assertion =
+          (cfg.oidc.enable && !cfg.oidc.passwordLogin)
+          -> (cfg.bots == { } && !cfg.admin.enable && !(lib.any (u: u.issueToken) (lib.attrValues cfg.users)));
+        message =
+          "kmatrix: oidc.passwordLogin = false, but something here needs a token minted by password login "
+          + "(a bot, an issueToken user, or the admin account). Leave password login on.";
       }
     ]
     ++ lib.mapAttrsToList (n: b: {
