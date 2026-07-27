@@ -1,4 +1,4 @@
-# gluck-matrix — Element web client.
+# kmatrix — Element web client.
 #
 # Static bundle only: a build of Element pinned to this homeserver, served
 # by the platform's Caddy like any other static site. Optionally behind
@@ -11,7 +11,7 @@
   ...
 }:
 let
-  cfg = config.services.gluck-matrix;
+  cfg = config.services.kmatrix;
 
   element = pkgs.element-web.override {
     conf = lib.recursiveUpdate {
@@ -31,7 +31,7 @@ let
 in
 {
   config = lib.mkIf (cfg.enable && cfg.element.enable) {
-    services.kelliher-web.sites.matrix-element = {
+    services.kelliher-web.sites.kmatrix-element = {
       subdomains = [ cfg.element.subdomain ];
       inherit (cfg.element) requireAuth;
       root = element;

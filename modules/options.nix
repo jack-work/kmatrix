@@ -1,11 +1,11 @@
-# gluck-matrix — the option surface.
+# kmatrix — the option surface.
 #
 # Everything a host config touches lives here. The shape mirrors the rest
 # of the stack: the site names a *subdomain*, never the zone; the platform
 # (services.kelliher-web.baseDomains) supplies the zone.
 { config, lib, ... }:
 let
-  cfg = config.services.gluck-matrix;
+  cfg = config.services.kmatrix;
 
   baseDomain = lib.head (config.services.kelliher-web.baseDomains ++ [ "invalid" ]);
 
@@ -51,19 +51,19 @@ let
         typically). When null, a random password is generated once at
         first provision and kept in the account's state directory —
         read it with
-        `ssh spain 'sudo cat /var/lib/gluck-matrix/accounts/<name>/password'`.
+        `ssh spain 'sudo cat /var/lib/kmatrix/accounts/<name>/password'`.
 
         Note: the password is only used at *registration* time (and to
         mint an access token). Changing this file later does not reset
         the password of an account that already exists — do that with
-        `matrix-admin` or from a client.
+        `kmatrix-admin` or from a client.
       '';
     };
   };
 in
 {
-  options.services.gluck-matrix = {
-    enable = lib.mkEnableOption "gluck-matrix — Synapse homeserver on kelliher-web";
+  options.services.kmatrix = {
+    enable = lib.mkEnableOption "kmatrix — Synapse homeserver on kelliher-web";
 
     serverName = lib.mkOption {
       type = lib.types.str;
@@ -155,7 +155,7 @@ in
 
     stateDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/gluck-matrix";
+      default = "/var/lib/kmatrix";
       description = ''
         Where this module keeps the registration shared secret and the
         per-account passwords/access tokens it provisions. Root-owned,
@@ -178,11 +178,11 @@ in
         default = true;
         description = ''
           Provision a server-admin account (`adminUser`) and keep a live
-          access token for it on disk, plus a `matrix-admin` CLI on the
+          access token for it on disk, plus a `kmatrix-admin` CLI on the
           host that speaks the Synapse admin API with it:
 
-            ssh spain 'sudo matrix-admin GET /_synapse/admin/v2/users?from=0'
-            ssh spain 'sudo matrix-admin POST /_synapse/admin/v1/rooms/<id>/make_room_admin'
+            ssh spain 'sudo kmatrix-admin GET /_synapse/admin/v2/users?from=0'
+            ssh spain 'sudo kmatrix-admin POST /_synapse/admin/v1/rooms/<id>/make_room_admin'
 
           This is the machine-facing key to the homeserver. It never
           leaves spain and is only readable by root.
@@ -266,18 +266,18 @@ in
         access token, and a hardened systemd service that receives the
         token through `LoadCredential` and its dependencies through the
         Nix store. The attribute name is the MXID localpart and the
-        unit name suffix (`matrix-bot-<name>.service`).
+        unit name suffix (`kmatrix-bot-<name>.service`).
 
-        Supply either `entrypoint` (a Python file, run with
-        `pythonPackages`) or `execStart` (anything else).
+        Supply either `execStart` (a built binary — the usual case; see
+        the packaged Go reference bot in `bots/echo`) or `entrypoint` (a
+        Python file, run with `pythonPackages`).
       '';
       example = lib.literalExpression ''
         {
           echo = {
             displayName = "Echo";
             autoJoin = [ "#lab:kelliher.info" ];
-            entrypoint = ./bots/echo.py;
-            pythonPackages = ps: with ps; [ matrix-nio ];
+            execStart = lib.getExe kmatrix.packages.''${system}.kmatrix-echo;
           };
         }
       '';
@@ -295,7 +295,11 @@ in
               entrypoint = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Python file to exec. Mutually exclusive with `execStart`.";
+                description = ''
+                  Python file to exec, for bots small enough not to
+                  deserve a derivation. Mutually exclusive with
+                  `execStart`.
+                '';
               };
 
               pythonPackages = lib.mkOption {
@@ -304,17 +308,21 @@ in
                 defaultText = lib.literalExpression "ps: with ps; [ matrix-nio aiohttp ]";
                 description = ''
                   Dependencies for `entrypoint`, in the usual
-                  `python3.withPackages` shape. The default is enough
-                  for a plain client bot; add `requests`, `duckdb`,
-                  `openai`, whatever the bot needs.
+                  `python3.withPackages` shape. Ignored when `execStart`
+                  is used — a compiled bot carries its own dependencies
+                  (Go's come from go.mod via `vendorHash`).
                 '';
               };
 
               execStart = lib.mkOption {
                 type = lib.types.nullOr lib.types.str;
                 default = null;
-                example = lib.literalExpression ''"''${pkgs.my-bot}/bin/my-bot"'';
-                description = "Command line for non-Python bots. Mutually exclusive with `entrypoint`.";
+                example = lib.literalExpression ''lib.getExe pkgs.kmatrix-echo'';
+                description = ''
+                  Command line for a packaged bot — the usual case.
+                  `lib.getExe <pkg>` is the idiomatic value.
+                  Mutually exclusive with `entrypoint`.
+                '';
               };
 
               environment = lib.mkOption {
@@ -349,7 +357,7 @@ in
 
               stateDirectory = lib.mkOption {
                 type = lib.types.str;
-                default = "matrix-bot-${name}";
+                default = "kmatrix-bot-${name}";
                 description = "`/var/lib/<this>` — the bot's own writable scratch (nio store, sqlite, …).";
               };
 
@@ -373,21 +381,21 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    services.gluck-matrix.publicHost = "${cfg.subdomain}.${baseDomain}";
+    services.kmatrix.publicHost = "${cfg.subdomain}.${baseDomain}";
 
     assertions = [
       {
         assertion = config.services.kelliher-web.baseDomains != [ ];
-        message = "gluck-matrix: services.kelliher-web.baseDomains is empty — the module has no zone to live in.";
+        message = "kmatrix: services.kelliher-web.baseDomains is empty — the module has no zone to live in.";
       }
     ]
     ++ lib.mapAttrsToList (n: b: {
       assertion = (b.entrypoint == null) != (b.execStart == null);
-      message = "gluck-matrix: bot '${n}' must set exactly one of `entrypoint` or `execStart`.";
+      message = "kmatrix: bot '${n}' must set exactly one of `entrypoint` or `execStart`.";
     }) cfg.bots
     ++ lib.mapAttrsToList (n: _: {
       assertion = !(cfg.users ? ${n});
-      message = "gluck-matrix: '${n}' is declared as both a bot and a user — one MXID, one owner.";
+      message = "kmatrix: '${n}' is declared as both a bot and a user — one MXID, one owner.";
     }) cfg.bots;
   };
 }

@@ -1,4 +1,4 @@
-# gluck-matrix — accounts, tokens, and the admin CLI.
+# kmatrix — accounts, tokens, and the admin CLI.
 #
 # The whole point of the module: an account is a line of Nix, not a
 # remembered incantation. Every declared user and bot gets a oneshot unit
@@ -23,7 +23,7 @@
   ...
 }:
 let
-  cfg = config.services.gluck-matrix;
+  cfg = config.services.kmatrix;
 
   accountsDir = "${cfg.stateDir}/accounts";
   hsUrl = "http://127.0.0.1:${toString cfg.port}";
@@ -33,7 +33,7 @@ let
   # host-local by nature and only ever used over loopback. Readable by
   # the matrix-synapse group because Synapse itself must read it.
   secretInit = pkgs.writeShellApplication {
-    name = "gluck-matrix-secret-init";
+    name = "kmatrix-secret-init";
     runtimeInputs = [ pkgs.coreutils ];
     text = ''
       install -d -m 0750 -o root -g matrix-synapse "${cfg.stateDir}"
@@ -53,7 +53,7 @@ let
 
   # ── the provisioner ─────────────────────────────────────────────
   provision = pkgs.writeShellApplication {
-    name = "gluck-matrix-provision";
+    name = "kmatrix-provision";
     runtimeInputs = with pkgs; [ curl jq openssl coreutils ];
     text = ''
       hs="${hsUrl}"
@@ -138,7 +138,7 @@ let
             identifier:{type:"m.id.user", user:$u},
             password:$p,
             device_id:$d,
-            initial_device_display_name:"gluck-matrix"}')
+            initial_device_display_name:"kmatrix"}')
         token=$(curl -fsS -X POST -H 'Content-Type: application/json' \
           -d "$login" "$hs/_matrix/client/v3/login" | jq -r .access_token)
         if [ -z "$token" ] || [ "$token" = "null" ]; then
@@ -177,25 +177,25 @@ let
 
   # ── the admin CLI ───────────────────────────────────────────────
   adminCli = pkgs.writeShellApplication {
-    name = "matrix-admin";
+    name = "kmatrix-admin";
     runtimeInputs = with pkgs; [ curl jq ];
     text = ''
-      # matrix-admin METHOD PATH [JSON_BODY]
+      # kmatrix-admin METHOD PATH [JSON_BODY]
       #
-      #   matrix-admin GET  /_synapse/admin/v2/users?from=0&limit=50
-      #   matrix-admin POST /_synapse/admin/v1/rooms/'!abc:${cfg.serverName}'/make_room_admin \
+      #   kmatrix-admin GET  /_synapse/admin/v2/users?from=0&limit=50
+      #   kmatrix-admin POST /_synapse/admin/v1/rooms/'!abc:${cfg.serverName}'/make_room_admin \
       #        '{"user_id":"@you:${cfg.serverName}"}'
       #
       # Speaks as @${cfg.admin.user}:${cfg.serverName}, a server admin.
       # Root only — the token is the homeserver's master key.
       if [ "$#" -lt 2 ]; then
-        echo "usage: matrix-admin <METHOD> <PATH> [JSON]" >&2
+        echo "usage: kmatrix-admin <METHOD> <PATH> [JSON]" >&2
         exit 64
       fi
 
       token_file="${accountsDir}/${cfg.admin.user}/access_token"
       if [ ! -r "$token_file" ]; then
-        echo "no admin token at $token_file (run as root; is gluck-matrix-account-${cfg.admin.user} happy?)" >&2
+        echo "no admin token at $token_file (run as root; is kmatrix-account-${cfg.admin.user} happy?)" >&2
         exit 69
       fi
 
@@ -216,30 +216,30 @@ let
     lib.mapAttrs (n: u: {
       inherit (u) displayName admin autoJoin passwordFile;
       issueToken = u.issueToken;
-      deviceId = "gluck-matrix-${n}";
+      deviceId = "kmatrix-${n}";
     }) cfg.users
     // lib.mapAttrs (n: b: {
       inherit (b) displayName admin autoJoin passwordFile;
       issueToken = true;
-      deviceId = "matrix-bot-${n}";
+      deviceId = "kmatrix-bot-${n}";
     }) cfg.bots
     // lib.optionalAttrs cfg.admin.enable {
       ${cfg.admin.user} = {
-        displayName = "gluck-matrix provisioner";
+        displayName = "kmatrix provisioner";
         admin = true;
         autoJoin = [ ];
         passwordFile = null;
         issueToken = true;
-        deviceId = "gluck-matrix-admin";
+        deviceId = "kmatrix-admin";
       };
     };
 
   accountUnit = name: a: {
-    name = "gluck-matrix-account-${name}";
+    name = "kmatrix-account-${name}";
     value = {
       description = "Provision Matrix account @${name}:${cfg.serverName}";
-      after = [ "matrix-synapse.service" "gluck-matrix-secret.service" ];
-      requires = [ "matrix-synapse.service" "gluck-matrix-secret.service" ];
+      after = [ "matrix-synapse.service" "kmatrix-secret.service" ];
+      requires = [ "matrix-synapse.service" "kmatrix-secret.service" ];
       wantedBy = [ "multi-user.target" ];
       environment = {
         MX_LOCALPART = name;
@@ -267,8 +267,8 @@ in
 {
   config = lib.mkIf cfg.enable {
     systemd.services = {
-      gluck-matrix-secret = {
-        description = "gluck-matrix — state directory and registration shared secret";
+      kmatrix-secret = {
+        description = "kmatrix — state directory and registration shared secret";
         before = [ "matrix-synapse.service" ];
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {

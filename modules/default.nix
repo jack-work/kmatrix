@@ -1,9 +1,9 @@
-# gluck-matrix NixOS module — aggregator.
+# kmatrix NixOS module — aggregator.
 #
 # Import this single file (it is `nixosModules.default`) and every concern
 # comes along:
 #
-#   options.nix    — the whole option surface (services.gluck-matrix.*).
+#   options.nix    — the whole option surface (services.kmatrix.*).
 #   synapse.nix    — the homeserver: postgres bootstrap, Synapse itself,
 #                    the Caddy site, well-known delegation.
 #   provision.nix  — registration shared secret, idempotent account

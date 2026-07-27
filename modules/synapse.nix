@@ -1,4 +1,4 @@
-# gluck-matrix — the homeserver itself.
+# kmatrix — the homeserver itself.
 #
 # Postgres (a dedicated database with C collation, which Synapse insists
 # on), Synapse bound to loopback, and the Caddy site that fronts it.
@@ -16,7 +16,7 @@
   ...
 }:
 let
-  cfg = config.services.gluck-matrix;
+  cfg = config.services.kmatrix;
 
   dbName = "matrix-synapse";
 
@@ -145,12 +145,12 @@ in
     };
 
     systemd.services.matrix-synapse = {
-      after = [ "matrix-synapse-db-init.service" "gluck-matrix-secret.service" ];
-      requires = [ "matrix-synapse-db-init.service" "gluck-matrix-secret.service" ];
+      after = [ "matrix-synapse-db-init.service" "kmatrix-secret.service" ];
+      requires = [ "matrix-synapse-db-init.service" "kmatrix-secret.service" ];
     };
 
     # ── the public face ─────────────────────────────────────────────
-    services.kelliher-web.sites.matrix = {
+    services.kelliher-web.sites.kmatrix = {
       subdomains = [ cfg.subdomain ];
       # Never requireAuth: Matrix clients carry their own access tokens
       # and would be bounced by forward-auth. Synapse is the authority
@@ -159,7 +159,7 @@ in
       proxyTo = cfg.port;
       extraConfig = ''
         # The Synapse admin API is root-of-the-homeserver. It stays on
-        # loopback — reachable from spain itself (see `matrix-admin`),
+        # loopback — reachable from spain itself (see `kmatrix-admin`),
         # never from the tunnel.
         handle /_synapse/admin/* {
           respond "not available here" 403
@@ -177,7 +177,7 @@ in
     # Delegation: server_name lives at the apex, the homeserver lives on
     # a subdomain, and these two documents are the bridge. Everything
     # else on the apex bounces to the personal site.
-    services.kelliher-web.sites.matrix-wellknown = lib.mkIf cfg.serveWellKnown {
+    services.kelliher-web.sites.kmatrix-wellknown = lib.mkIf cfg.serveWellKnown {
       hostnames = [ cfg.serverName ];
       requireAuth = false;
       # The platform needs *a* root or a proxy target; this site answers

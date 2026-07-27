@@ -1,4 +1,4 @@
-# gluck-matrix — one hardened service per declared bot.
+# kmatrix — one hardened service per declared bot.
 #
 # A bot is a Matrix account (provision.nix) plus a process that holds its
 # token. The process never learns where the token lives on disk: systemd
@@ -12,7 +12,7 @@
   ...
 }:
 let
-  cfg = config.services.gluck-matrix;
+  cfg = config.services.kmatrix;
 
   hsUrl = "http://127.0.0.1:${toString cfg.port}";
   tokenOf = name: "${cfg.stateDir}/accounts/${name}/access_token";
@@ -41,12 +41,12 @@ let
   };
 
   botUnit = name: bot: {
-    name = "matrix-bot-${name}";
+    name = "kmatrix-bot-${name}";
     value = let
       py = pkgs.python3.withPackages bot.pythonPackages;
       exec =
         if bot.entrypoint != null then "${py}/bin/python ${bot.entrypoint}" else bot.execStart;
-      account = "gluck-matrix-account-${name}.service";
+      account = "kmatrix-account-${name}.service";
     in
     {
       description = "Matrix bot @${name}:${cfg.serverName}";
@@ -59,7 +59,7 @@ let
         MATRIX_HOMESERVER = hsUrl;
         MATRIX_SERVER_NAME = cfg.serverName;
         MATRIX_USER_ID = "@${name}:${cfg.serverName}";
-        MATRIX_DEVICE_ID = "matrix-bot-${name}";
+        MATRIX_DEVICE_ID = "kmatrix-bot-${name}";
         # %d is systemd's credentials directory. The bot reads the file;
         # the token is never an environment value (those leak into
         # /proc, `systemctl show`, and journal dumps).
