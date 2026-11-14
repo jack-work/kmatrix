@@ -6,8 +6,7 @@
 #
 #   1. ensures a password exists (sops file, or generated once and kept),
 #   2. registers the account if the homeserver doesn't have it, using the
-#      shared-secret admin registration flow (nonce + HMAC-SHA1) — never
-#      putting the secret or the password on a command line,
+#      shared-secret admin registration flow (nonce + HMAC-SHA1),
 #   3. mints an access token if the stored one no longer answers
 #      /whoami, so tokens survive redeploys instead of churning,
 #   4. sets the display name and joins the declared rooms.
@@ -54,11 +53,14 @@ let
   # ── the provisioner ─────────────────────────────────────────────
   provision = pkgs.writeShellApplication {
     name = "kmatrix-provision";
-    runtimeInputs = with pkgs; [ curl jq openssl coreutils ];
+    runtimeInputs = with pkgs; [ curl jq coreutils python3 ];
     text = ''
       hs="${hsUrl}"
       dir="${accountsDir}/$MX_LOCALPART"
       mxid="@$MX_LOCALPART:${cfg.serverName}"
+      work="$RUNTIME_DIRECTORY"
+      umask 077
+      trap 'rm -f "$work/auth" "$work/register.json" "$work/login.json"' EXIT
 
       install -d -m 0700 -o root -g root "$dir"
 
@@ -76,16 +78,14 @@ let
 
       # ── password ────────────────────────────────────────────────
       if [ -n "''${CREDENTIALS_DIRECTORY:-}" ] && [ -s "$CREDENTIALS_DIRECTORY/password" ]; then
-        pass=$(cat "$CREDENTIALS_DIRECTORY/password")
+        passfile="$CREDENTIALS_DIRECTORY/password"
       else
         if [ ! -s "$dir/password" ]; then
-          ( umask 077; head -c 32 /dev/urandom | base64 -w0 > "$dir/password.tmp" )
+          head -c 32 /dev/urandom | base64 -w0 > "$dir/password.tmp"
           mv "$dir/password.tmp" "$dir/password"
         fi
-        pass=$(cat "$dir/password")
+        passfile="$dir/password"
       fi
-
-      secret=$(cat "${cfg.stateDir}/registration_shared_secret")
 
       # ── register (idempotent) ───────────────────────────────────
       if [ "$MX_ADMIN" = "1" ]; then
@@ -95,15 +95,20 @@ let
       fi
 
       nonce=$(curl -fsS "$hs/_synapse/admin/v1/register" | jq -r .nonce)
-      mac=$(printf '%s\0%s\0%s\0%s' "$nonce" "$MX_LOCALPART" "$pass" "$admin_word" \
-        | openssl dgst -sha1 -hmac "$secret" -hex | sed 's/^.*= *//')
-
-      body=$(jq -n --arg n "$nonce" --arg u "$MX_LOCALPART" --arg p "$pass" \
-        --argjson a "$admin_bool" --arg m "$mac" \
-        '{nonce:$n, username:$u, password:$p, admin:$a, mac:$m}')
+      python3 - "$nonce" "$MX_LOCALPART" "$passfile" "${cfg.stateDir}/registration_shared_secret" \
+        "$admin_word" "$admin_bool" "$work/register.json" <<'PY'
+      import hashlib, hmac, json, sys
+      nonce, user, passfile, secretfile, word, admin, out = sys.argv[1:]
+      password = open(passfile).read().rstrip("\n")
+      secret = open(secretfile).read().rstrip("\n")
+      mac = hmac.new(secret.encode(), "\0".join([nonce, user, password, word]).encode(), hashlib.sha1).hexdigest()
+      with open(out, "w") as f:
+          json.dump({"nonce": nonce, "username": user, "password": password, "admin": admin == "true", "mac": mac}, f)
+      PY
 
       resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
-        -d "$body" "$hs/_synapse/admin/v1/register" || true)
+        --data-binary @"$work/register.json" "$hs/_synapse/admin/v1/register" || true)
+      rm -f "$work/register.json"
 
       if printf '%s' "$resp" | jq -e '.access_token' >/dev/null 2>&1; then
         echo "registered $mxid"
@@ -126,33 +131,36 @@ let
       token=""
       if [ -s "$dir/access_token" ]; then
         existing=$(cat "$dir/access_token")
-        if curl -fsS -o /dev/null -H "Authorization: Bearer $existing" \
+        printf 'Authorization: Bearer %s\n' "$existing" > "$work/auth"
+        if curl -fsS -o /dev/null -H @"$work/auth" \
              "$hs/_matrix/client/v3/account/whoami"; then
           token="$existing"
         fi
       fi
 
       if [ -z "$token" ]; then
-        login=$(jq -n --arg u "$MX_LOCALPART" --arg p "$pass" --arg d "$MX_DEVICE_ID" \
+        jq -n --arg u "$MX_LOCALPART" --rawfile p "$passfile" --arg d "$MX_DEVICE_ID" \
           '{type:"m.login.password",
             identifier:{type:"m.id.user", user:$u},
-            password:$p,
+            password:($p | sub("\n+$"; "")),
             device_id:$d,
-            initial_device_display_name:"kmatrix"}')
+            initial_device_display_name:"kmatrix"}' > "$work/login.json"
         token=$(curl -fsS -X POST -H 'Content-Type: application/json' \
-          -d "$login" "$hs/_matrix/client/v3/login" | jq -r .access_token)
+          --data-binary @"$work/login.json" "$hs/_matrix/client/v3/login" | jq -r .access_token)
+        rm -f "$work/login.json"
         if [ -z "$token" ] || [ "$token" = "null" ]; then
           echo "login failed for $mxid — the account exists but its password is not the one on file" >&2
           exit 1
         fi
-        ( umask 077; printf '%s' "$token" > "$dir/access_token.tmp" )
+        printf '%s' "$token" > "$dir/access_token.tmp"
         mv "$dir/access_token.tmp" "$dir/access_token"
+        printf 'Authorization: Bearer %s\n' "$token" > "$work/auth"
         echo "issued a fresh access token for $mxid"
       fi
 
       # ── profile ─────────────────────────────────────────────────
       if [ -n "''${MX_DISPLAYNAME:-}" ]; then
-        curl -fsS -o /dev/null -X PUT -H "Authorization: Bearer $token" \
+        curl -fsS -o /dev/null -X PUT -H @"$work/auth" \
           -H 'Content-Type: application/json' \
           -d "$(jq -n --arg n "$MX_DISPLAYNAME" '{displayname:$n}')" \
           "$hs/_matrix/client/v3/profile/$mxid/displayname" \
@@ -162,7 +170,7 @@ let
       # ── rooms ───────────────────────────────────────────────────
       for room in ''${MX_ROOMS:-}; do
         enc=$(jq -rn --arg s "$room" '$s|@uri')
-        if curl -fsS -o /dev/null -X POST -H "Authorization: Bearer $token" \
+        if curl -fsS -o /dev/null -X POST -H @"$work/auth" \
              -H 'Content-Type: application/json' -d '{}' \
              "$hs/_matrix/client/v3/join/$enc"; then
           echo "$mxid joined $room"
@@ -180,7 +188,7 @@ let
     name = "kmatrix-admin";
     runtimeInputs = with pkgs; [ curl jq ];
     text = ''
-      # kmatrix-admin METHOD PATH [JSON_BODY]
+      # kmatrix-admin METHOD PATH [JSON_BODY | -]
       #
       #   kmatrix-admin GET  /_synapse/admin/v2/users?from=0&limit=50
       #   kmatrix-admin POST /_synapse/admin/v1/rooms/'!abc:${cfg.serverName}'/make_room_admin \
@@ -189,7 +197,7 @@ let
       # Speaks as @${cfg.admin.user}:${cfg.serverName}, a server admin.
       # Root only — the token is the homeserver's master key.
       if [ "$#" -lt 2 ]; then
-        echo "usage: kmatrix-admin <METHOD> <PATH> [JSON]" >&2
+        echo "usage: kmatrix-admin <METHOD> <PATH> [JSON | - for stdin]" >&2
         exit 64
       fi
 
@@ -202,10 +210,19 @@ let
       method="$1"; path="$2"; shift 2
       body="''${1:-}"
 
+      umask 077
+      work=$(mktemp -d /run/kmatrix-admin.XXXXXX)
+      trap 'rm -rf "$work"' EXIT
+      printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" > "$work/auth"
+
       set -- -sS -X "$method" \
-        -H "Authorization: Bearer $(cat "$token_file")" \
+        -H @"$work/auth" \
         -H 'Content-Type: application/json'
-      if [ -n "$body" ]; then set -- "$@" -d "$body"; fi
+      if [ "$body" = "-" ]; then
+        set -- "$@" --data-binary @-
+      elif [ -n "$body" ]; then
+        set -- "$@" --data-raw "$body"
+      fi
 
       curl "$@" "${hsUrl}$path" | jq .
     '';
@@ -255,6 +272,8 @@ let
         # Root: it reads the shared secret and writes credentials that
         # no service user may own.
         ExecStart = lib.getExe provision;
+        RuntimeDirectory = "kmatrix-account-${name}";
+        RuntimeDirectoryMode = "0700";
         # A homeserver that is slow to come up should not wedge the boot.
         TimeoutStartSec = "180s";
       }
